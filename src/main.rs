@@ -3,8 +3,8 @@ mod xml_quote;
 mod num_fmt;
 use string_interner::{StringInterner, Sym};
 
-use std::io::{self, BufRead, BufReader};
-use std::fmt::{Write};
+use std::io::{self, Write as IoWrite, BufRead, BufReader};
+use std::fmt::{Write as FmtWrite};
 use std::collections::{HashMap};
 use xml_quote::{XmlQuote};
 use num_fmt::{NumFmt};
@@ -30,18 +30,22 @@ impl Node {
         if let Some(child_name) = path.next() {
             self.children
                 .get_or_insert_with(|| HashMap::new())
-                .entry(child_name.into())
+                .entry(child_name)
                 .or_insert_with(|| Node::new())
                 .add(path, count);
         }
     }
 
-    pub fn depth(&self, min_count: u64, depth: u64) -> u64 {
+    pub fn depth(&self, min_count: u64) -> u64 {
+        self.depth_inner(min_count, 0)
+    }
+
+    fn depth_inner(&self, min_count: u64, depth: u64) -> u64 {
         if self.count < min_count {
             return depth;
         }
         if let Some(children) = &self.children {
-            children.values().map(|c|c.depth(min_count, depth+1))
+            children.values().map(|c| c.depth_inner(min_count, depth+1))
                 .max().unwrap_or(depth)
         } else {
             depth
@@ -176,13 +180,15 @@ fn main() {
         };
 
         if reverse {
-            root.add(&mut stack.rsplit(';')
-                .filter(|s|!s.is_empty())
-                .map(|s| interner.get_or_intern(s)), count);
-        } else {
-            root.add(&mut stack.split(';')
+            let iter = &mut stack.rsplit(';')
                 .filter(|s| !s.is_empty())
-                .map(|s| interner.get_or_intern(s)), count);
+                .map(|s| interner.get_or_intern(s));
+            root.add(iter, count);
+        } else {
+            let iter = &mut stack.split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| interner.get_or_intern(s));
+            root.add(iter, count);
         };
     }
 
@@ -198,7 +204,7 @@ fn main() {
     let px_per_count = width / (root.count as f32);
 
     let min_count = (min_width / px_per_count) as u64;
-    let max_depth = root.depth(min_count, 0);
+    let max_depth = root.depth(min_count);
 
     let height = ((max_depth + 1) as f32) * px_per_depth;
 
@@ -206,7 +212,7 @@ fn main() {
 
     let mut output = String::new();
 
-    write!(&mut output, r#"<?xml version="1.0" standalone="no"?>
+    write!(&mut output, r#"<?xml version="1.0" encoding="utf-8"?>
         <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
         <svg version="1.1" width="{0}" height="{1}" viewBox="0 0 {0} {1}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
         <style>rect {{ stroke-width: 0.5; stroke: #ddd; }}
@@ -221,6 +227,8 @@ fn main() {
         let rect_width = (rect.count as f32) * px_per_count;
         if rect_width < min_width { continue; }
         let y = if upside_down { rect.depth } else { max_depth - rect.depth };
+        let text = interner.resolve(rect.name)
+            .expect("could not resolve interned string?");
         write!(&mut output,
 r#"<g><title>{text} ({count} {count_name} {percent:.1}%)</title>
 <rect x="{x}" y="{y}" width="{w}" height="{h}" fill="red" />
@@ -234,12 +242,14 @@ r#"<g><title>{text} ({count} {count_name} {percent:.1}%)</title>
                  count_name=XmlQuote::new(count_name),
                  count=NumFmt::new(rect.count),
                  percent=100.0*(rect_width / width),
-                 text=XmlQuote::new(interner.resolve(rect.name).expect("could not resolve name?")),
+                 text=XmlQuote::new(text),
                  idx=rect_id);
         rect_id += 1;
     }
     write!(&mut output, r#"</svg>"#);
-    println!("{}", output);
+
+    io::stdout().write(output.as_bytes())
+        .expect("could not output svg");
     if invalid_lines > 0 {
         eprintln!("invalid lines: {}", invalid_lines);
     }
