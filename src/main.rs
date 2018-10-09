@@ -1,12 +1,12 @@
 extern crate string_interner;
-mod xml_quote;
+mod xml_escape;
 mod num_fmt;
 use string_interner::{StringInterner, Sym};
 
 use std::io::{self, Write as IoWrite, BufRead, BufReader};
 use std::fmt::{Write as FmtWrite};
 use std::collections::{HashMap};
-use xml_quote::{XmlQuote};
+use xml_escape::{XmlEscape};
 use num_fmt::{NumFmt};
 
 #[derive(Debug)]
@@ -239,10 +239,10 @@ r#"<g><title>{text} ({count} {count_name} {percent:.1}%)</title>
                  y=(y as f32) * px_per_depth,
                  w=rect_width,
                  h=px_per_depth-1.0,
-                 count_name=XmlQuote::new(count_name),
+                 count_name=XmlEscape::new(count_name),
                  count=NumFmt::new(rect.count),
                  percent=100.0*(rect_width / width),
-                 text=XmlQuote::new(text),
+                 text=XmlEscape::new(text),
                  idx=rect_id);
         rect_id += 1;
     }
