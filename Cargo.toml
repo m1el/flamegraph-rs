@@ -1,0 +1,7 @@
+[package]
+name = "flamegraph"
+version = "0.1.0"
+authors = ["Igor null <m1el.2027@gmail.com>"]
+
+[dependencies]
+string_cache = "0.7.3"
