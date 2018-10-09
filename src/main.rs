@@ -1,15 +1,18 @@
-extern crate string_cache;
-use string_cache::atom::{DefaultAtom};
+extern crate string_interner;
+mod xml_quote;
+mod num_fmt;
+use string_interner::{StringInterner, Sym};
 
 use std::io::{self, BufRead, BufReader};
 use std::fmt::{Write};
 use std::collections::{HashMap};
-type StrIntern = DefaultAtom;
+use xml_quote::{XmlQuote};
+use num_fmt::{NumFmt};
 
 #[derive(Debug)]
 struct Node {
     count: u64,
-    children: Option<HashMap<StrIntern, Node>>,
+    children: Option<HashMap<Sym, Node>>,
 }
 
 impl Node {
@@ -20,40 +23,51 @@ impl Node {
         }
     }
 
-    pub fn add<'a, I>(&mut self, path: &mut I, count: u64, depth: u64) -> u64
-        where I: Iterator<Item=&'a str>
+    pub fn add<'a, I>(&mut self, path: &mut I, count: u64)
+        where I: Iterator<Item=Sym>
     {
         self.count += count;
         if let Some(child_name) = path.next() {
-            return self.children
+            self.children
                 .get_or_insert_with(|| HashMap::new())
                 .entry(child_name.into())
                 .or_insert_with(|| Node::new())
-                .add(path, count, depth + 1);
+                .add(path, count);
         }
-        return depth;
+    }
+
+    pub fn depth(&self, min_count: u64, depth: u64) -> u64 {
+        if self.count < min_count {
+            return depth;
+        }
+        if let Some(children) = &self.children {
+            children.values().map(|c|c.depth(min_count, depth+1))
+                .max().unwrap_or(depth)
+        } else {
+            depth
+        }
     }
 
     #[allow(dead_code)]
-    pub fn print(&self, name: &StrIntern, depth: usize) {
-        println!("{:pad$}{} {}", "", name, self.count, pad=depth);
+    pub fn print(&self, interner: &StringInterner<Sym>, name: &Sym, depth: usize) {
+        println!("{:pad$}{} {}", "", interner.resolve(*name).expect("lost interned string?"), self.count, pad=depth);
         let children = if let Some(c) = &self.children { c } else { return };
-        let mut keys: Vec<StrIntern> = children.keys().cloned().collect();
+        let mut keys: Vec<Sym> = children.keys().cloned().collect();
         keys.sort();
         for k in keys {
-            children[&k].print(&k, depth + 1);
+            children[&k].print(interner, &k, depth + 1);
         }
     }
 
     #[allow(dead_code)]
-    pub fn gen_rects(&self, name: &StrIntern, depth: u64, offset: u64, buf: &mut Vec<Rect>) {
+    pub fn gen_rects(&self, name: &Sym, depth: u64, offset: u64, buf: &mut Vec<Rect>) {
         buf.push(Rect {
             name: name.clone(),
             count: self.count,
             depth, offset,
         });
         let children = if let Some(c) = &self.children { c } else { return };
-        let mut keys: Vec<StrIntern> = children.keys().cloned().collect();
+        let mut keys: Vec<Sym> = children.keys().cloned().collect();
         keys.sort();
         let mut delta = 0;
         for k in keys {
@@ -66,23 +80,23 @@ impl Node {
 
 #[derive(Debug)]
 struct Rect {
-    name: StrIntern,
+    name: Sym,
     count: u64,
     depth: u64,
     offset: u64,
 }
 
 struct Frame<'a> {
-    keys: Vec<StrIntern>,
+    keys: Vec<Sym>,
     start: u64,
     offset: u64,
-    name: StrIntern,
+    name: Sym,
     node: &'a Node,
 }
 impl<'a> Frame<'a> {
-    pub fn new(node: &'a Node, name: &StrIntern, offset: u64) -> Frame<'a> {
+    pub fn new(node: &'a Node, name: &Sym, offset: u64) -> Frame<'a> {
         let keys = if let Some(children) = &node.children {
-            let mut keys: Vec<StrIntern> = children.keys().cloned().collect();
+            let mut keys: Vec<Sym> = children.keys().cloned().collect();
             keys.sort_by(|a, b| b.cmp(a));
             keys
         } else {
@@ -100,7 +114,7 @@ struct Rects<'a> {
     stack: Vec<Frame<'a>>,
 }
 impl<'a> Rects<'a> {
-    pub fn new(node: &'a Node, name: &StrIntern) -> Rects<'a> {
+    pub fn new(node: &'a Node, name: &Sym) -> Rects<'a> {
         Rects { stack: vec![Frame::new(node, name, 0)] }
     }
 }
@@ -134,8 +148,8 @@ fn main() {
     let mut invalid_lines = 0_u64;
     let reverse = false;
 
+    let mut interner = StringInterner::default();
     let mut root = Node::new();
-    let mut max_depth = 0;
     for line_res in input.lines() {
         let string = if let Ok(line) = line_res {
             line
@@ -161,25 +175,34 @@ fn main() {
             continue;
         };
 
-        let depth;
         if reverse {
-            depth = root.add(&mut stack.rsplit(';').filter(|s|!s.is_empty()), count, 0)
+            root.add(&mut stack.rsplit(';')
+                .filter(|s|!s.is_empty())
+                .map(|s| interner.get_or_intern(s)), count);
         } else {
-            depth = root.add(&mut stack.split(';').filter(|s|!s.is_empty()), count, 0)
+            root.add(&mut stack.split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| interner.get_or_intern(s)), count);
         };
-        max_depth = max_depth.max(depth);
     }
 
-    let name: StrIntern = "all".into();
+    let name: Sym = interner.get_or_intern("all");
     if root.count == 0 {
         eprintln!("no valid stack counts provided!");
         return;
     }
+
     let width = 1910.0_f32;
     let px_per_depth = 20.0_f32;
-    let height = ((max_depth + 1) as f32) * px_per_depth;
-    let px_per_count = width / (root.count as f32);
     let min_width = 0.1_f32;
+    let px_per_count = width / (root.count as f32);
+
+    let min_count = (min_width / px_per_count) as u64;
+    let max_depth = root.depth(min_count, 0);
+
+    let height = ((max_depth + 1) as f32) * px_per_depth;
+
+    let count_name = "samples";
 
     let mut output = String::new();
 
@@ -192,14 +215,14 @@ fn main() {
 "#,
         width, height);
 
-    let mut idx = 0;
+    let mut rect_id = 0;
     let upside_down = false;
     for rect in Rects::new(&root, &name) {
         let rect_width = (rect.count as f32) * px_per_count;
         if rect_width < min_width { continue; }
         let y = if upside_down { rect.depth } else { max_depth - rect.depth };
         write!(&mut output,
-r#"<g><title>{text} ({count} samples {percent:.1}%)</title>
+r#"<g><title>{text} ({count} {count_name} {percent:.1}%)</title>
 <rect x="{x}" y="{y}" width="{w}" height="{h}" fill="red" />
 <clipPath id="clip{idx}"><rect x="{x}" y="{y}" width="{w}" height="{h}" /></clipPath>
 <text x="{x}" y="{y}" clip-path="url(#clip{idx})">{text}</text></g>
@@ -208,11 +231,12 @@ r#"<g><title>{text} ({count} samples {percent:.1}%)</title>
                  y=(y as f32) * px_per_depth,
                  w=rect_width,
                  h=px_per_depth-1.0,
-                 count=rect.count,
+                 count_name=XmlQuote::new(count_name),
+                 count=NumFmt::new(rect.count),
                  percent=100.0*(rect_width / width),
-                 text=rect.name,
-                 idx=idx);
-        idx += 1;
+                 text=XmlQuote::new(interner.resolve(rect.name).expect("could not resolve name?")),
+                 idx=rect_id);
+        rect_id += 1;
     }
     write!(&mut output, r#"</svg>"#);
     println!("{}", output);
